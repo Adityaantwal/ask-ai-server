@@ -1,28 +1,22 @@
-const express    = require('express');
-const Anthropic  = require('@anthropic-ai/sdk');
+const express = require('express');
 require('dotenv').config();
 
-const app    = express();
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
+const app        = express();
 const SECRET_KEY = process.env.SECRET_KEY || 'changeme123';
+const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const PORT       = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// Auth middleware
 app.use((req, res, next) => {
+  if (req.path === '/ping') return next();
   const key = req.headers['x-secret-key'];
-  if (key !== SECRET_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  if (key !== SECRET_KEY) return res.status(401).json({ error: 'Unauthorized' });
   next();
 });
 
-// Health check (no auth needed)
 app.get('/ping', (req, res) => res.send('OK'));
 
-// Main ask endpoint — streams response back
 app.post('/ask', async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: 'No prompt provided' });
@@ -33,32 +27,52 @@ app.post('/ask', async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
 
   try {
-    const stream = client.messages.stream({
-      model:      'claude-sonnet-4-20250514',
-      max_tokens: 2048,
-      system:     `You are a concise programming assistant used from a terminal.
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key=${GEMINI_KEY}`;
+
+    const geminiRes = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        system_instruction: {
+          parts: [{ text: `You are a concise programming assistant used from a terminal.
 - Always give working code with minimal explanation.
 - Use the language the user implies or asks for.
-- Keep answers short and direct — no fluff.
+- Keep answers short and direct, no fluff.
 - For code questions: code first, brief explanation after.
-- Use plain text only, no markdown headers.`,
-      messages: [{ role: 'user', content: prompt }],
+- Use plain text only, no markdown headers.` }]
+        },
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: { maxOutputTokens: 2048 }
+      })
     });
 
-    stream.on('text', (text) => {
-      res.write(`data: ${JSON.stringify({ text })}\n\n`);
-    });
+    const reader = geminiRes.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
 
-    stream.on('finalMessage', () => {
-      res.write('data: [DONE]\n\n');
-      res.end();
-    });
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    stream.on('error', (err) => {
-      res.write(`data: ${JSON.stringify({ text: `\n[Error]: ${err.message}` })}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-    });
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(data);
+            const text = parsed?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (text) res.write(`data: ${JSON.stringify({ text })}\n\n`);
+          } catch {}
+        }
+      }
+    }
+
+    res.write('data: [DONE]\n\n');
+    res.end();
 
   } catch (err) {
     res.write(`data: ${JSON.stringify({ text: `[Error]: ${err.message}` })}\n\n`);
@@ -68,6 +82,5 @@ app.post('/ask', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n[stealth-ai] Server running on port ${PORT}`);
-  console.log(`[stealth-ai] Secret key: ${SECRET_KEY}\n`);
+  console.log(`[stealth-ai] Server running on port ${PORT}`);
 });
