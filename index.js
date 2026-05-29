@@ -46,6 +46,7 @@ app.post('/ask', async (req, res) => {
       })
     });
 
+     console.log('Gemini status:', geminiRes.status);
     const reader = geminiRes.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -66,7 +67,7 @@ app.post('/ask', async (req, res) => {
             const parsed = JSON.parse(data);
             const text = parsed?.candidates?.[0]?.content?.parts?.[0]?.text;
             if (text) res.write(`data: ${JSON.stringify({ text })}\n\n`);
-          } catch {}
+          }  catch(e) { console.error('PARSE ERR', e.message); }
         }
       }
     }
